@@ -2,7 +2,8 @@ import { GizmoHelper, GizmoViewport, OrbitControls } from "@react-three/drei";
 import { Canvas } from "@react-three/fiber";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BufferAttribute, BufferGeometry, EdgesGeometry } from "three";
-import type { MeshPayload } from "../types";
+import type { MeshPayload, RigidTransform } from "../types";
+import { normalizeRigidTransform } from "../shapeTransforms";
 import type { MeshStreamChunk, OpenCadApiClient } from "../api/client";
 import { getMeshMaterialGroups } from "../meshHighlight";
 
@@ -10,6 +11,10 @@ interface Viewport3DProps {
   meshes: MeshPayload[];
   selectedShapeId?: string | null;
   highlightedShapeIds?: ReadonlySet<string>;
+  collisionShapeIds?: ReadonlySet<string>;
+  collisionColor?: string;
+  /** Renderer-ready world transforms keyed by shape ID. */
+  shapeTransforms?: Readonly<Record<string, RigidTransform>>;
   onSelectShape?: (shapeId: string) => void;
   /** Optional: provide the API client to enable SSE streaming. */
   apiClient?: OpenCadApiClient;
@@ -32,14 +37,21 @@ function MeshItem({
   mesh,
   selected,
   selectedOwnerShapeId,
+  colliding = false,
+  collisionColor = "#dc2626",
+  transform,
   onSelect
 }: {
   mesh: MeshPayload;
   selected: boolean;
   selectedOwnerShapeId?: string | null;
+  colliding?: boolean;
+  collisionColor?: string;
+  transform?: RigidTransform;
   onSelect?: (shapeId: string) => void;
 }): JSX.Element {
   const [hovered, setHovered] = useState(false);
+  const rigidTransform = normalizeRigidTransform(transform);
   const geometry = useMemo(() => {
     const g = new BufferGeometry();
     const positions = toFloat32(mesh.vertices);
@@ -73,12 +85,15 @@ function MeshItem({
     };
   }, [edgeGeometry, geometry]);
 
-  const color = hovered ? "#8aa2bf" : "#9ca3af";
+  const color = colliding ? collisionColor : hovered ? "#8aa2bf" : "#9ca3af";
   const hasSubsetHighlight = geometry.groups.some((group) => group.materialIndex === 1)
     && geometry.groups.some((group) => group.materialIndex === 0);
 
   return (
-    <group>
+    <group
+      position={rigidTransform.translation_mm}
+      quaternion={rigidTransform.rotation_quaternion_xyzw}
+    >
       <mesh
         geometry={geometry}
         onPointerOver={(event) => {
@@ -95,10 +110,10 @@ function MeshItem({
         }}
       >
         <meshStandardMaterial attach="material-0" color={color} flatShading metalness={0.1} roughness={0.75} />
-        <meshStandardMaterial attach="material-1" color="#1f6feb" flatShading metalness={0.1} roughness={0.75} />
+        <meshStandardMaterial attach="material-1" color={colliding ? collisionColor : "#1f6feb"} flatShading metalness={0.1} roughness={0.75} />
       </mesh>
       <lineSegments geometry={edgeGeometry}>
-        <lineBasicMaterial color={selected && !hasSubsetHighlight ? "#0b4ea2" : "#5f6774"} />
+        <lineBasicMaterial color={colliding ? collisionColor : selected && !hasSubsetHighlight ? "#0b4ea2" : "#5f6774"} />
       </lineSegments>
     </group>
   );
@@ -113,15 +128,22 @@ function StreamingMeshItem({
   apiClient,
   selected,
   selectedOwnerShapeId,
+  colliding = false,
+  collisionColor = "#dc2626",
+  transform,
   onSelect,
 }: {
   shapeId: string;
   apiClient: OpenCadApiClient;
   selected: boolean;
   selectedOwnerShapeId?: string | null;
+  colliding?: boolean;
+  collisionColor?: string;
+  transform?: RigidTransform;
   onSelect?: (shapeId: string) => void;
 }): JSX.Element | null {
   const [hovered, setHovered] = useState(false);
+  const rigidTransform = normalizeRigidTransform(transform);
   const geometryRef = useRef<BufferGeometry | null>(null);
   const edgeGeomRef = useRef<EdgesGeometry | null>(null);
   const [, forceUpdate] = useState(0);
@@ -198,12 +220,15 @@ function StreamingMeshItem({
   )) {
     geometryRef.current.addGroup(group.start, group.count, group.materialIndex);
   }
-  const color = hovered ? "#8aa2bf" : "#9ca3af";
+  const color = colliding ? collisionColor : hovered ? "#8aa2bf" : "#9ca3af";
   const hasSubsetHighlight = geometryRef.current.groups.some((group) => group.materialIndex === 1)
     && geometryRef.current.groups.some((group) => group.materialIndex === 0);
 
   return (
-    <group>
+    <group
+      position={rigidTransform.translation_mm}
+      quaternion={rigidTransform.rotation_quaternion_xyzw}
+    >
       <mesh
         geometry={geometryRef.current}
         onPointerOver={(event) => { event.stopPropagation(); setHovered(true); }}
@@ -211,18 +236,18 @@ function StreamingMeshItem({
         onPointerDown={(event) => { event.stopPropagation(); onSelect?.(shapeId); }}
       >
         <meshStandardMaterial attach="material-0" color={color} flatShading metalness={0.1} roughness={0.75} />
-        <meshStandardMaterial attach="material-1" color="#1f6feb" flatShading metalness={0.1} roughness={0.75} />
+        <meshStandardMaterial attach="material-1" color={colliding ? collisionColor : "#1f6feb"} flatShading metalness={0.1} roughness={0.75} />
       </mesh>
       {edgeGeomRef.current && (
         <lineSegments geometry={edgeGeomRef.current}>
-          <lineBasicMaterial color={selected && !hasSubsetHighlight ? "#0b4ea2" : "#5f6774"} />
+          <lineBasicMaterial color={colliding ? collisionColor : selected && !hasSubsetHighlight ? "#0b4ea2" : "#5f6774"} />
         </lineSegments>
       )}
     </group>
   );
 }
 
-export function Viewport3D({ meshes, selectedShapeId, highlightedShapeIds, onSelectShape, apiClient, useStreaming }: Viewport3DProps): JSX.Element {
+export function Viewport3D({ meshes, selectedShapeId, highlightedShapeIds, collisionShapeIds, collisionColor, shapeTransforms, onSelectShape, apiClient, useStreaming }: Viewport3DProps): JSX.Element {
   const isSelected = useCallback(
     (shapeId: string) => highlightedShapeIds?.has(shapeId) ?? shapeId === selectedShapeId,
     [highlightedShapeIds, selectedShapeId],
@@ -249,6 +274,9 @@ export function Viewport3D({ meshes, selectedShapeId, highlightedShapeIds, onSel
                 apiClient={apiClient}
                 selected={isSelected(id)}
                 selectedOwnerShapeId={selectedShapeId}
+                colliding={collisionShapeIds?.has(id)}
+                collisionColor={collisionColor}
+                transform={shapeTransforms?.[id]}
                 onSelect={onSelectShape}
               />
             ))
@@ -258,6 +286,9 @@ export function Viewport3D({ meshes, selectedShapeId, highlightedShapeIds, onSel
                 mesh={mesh}
                 selected={isSelected(mesh.shapeId)}
                 selectedOwnerShapeId={selectedShapeId}
+                colliding={collisionShapeIds?.has(mesh.shapeId)}
+                collisionColor={collisionColor}
+                transform={shapeTransforms?.[mesh.shapeId]}
                 onSelect={onSelectShape}
               />
             ))}

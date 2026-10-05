@@ -5,11 +5,12 @@ import {
   FeatureTreePanel,
   OpenCadApiClient,
   SketchEditor,
+  ScenePlayer,
+  robotPickPlaceExample,
   Viewport3D,
   createEmptyTree,
   getHighlightedViewportShapeIds,
   getViewportShapeIds,
-  mockMeshes,
   sketchFromNode,
 } from "opencad-viewport";
 import type {
@@ -19,8 +20,6 @@ import type {
   FeatureTreeView,
   MeshPayload,
 } from "opencad-viewport";
-
-const FALLBACK_MESH_Y_OFFSET_SCALE = 0.35;
 
 function getLatestGeneratedNodeId(
   previousTree: FeatureTreeView,
@@ -46,30 +45,12 @@ function getLatestGeneratedNodeId(
   return newNodeIds.length > 0 ? newNodeIds[newNodeIds.length - 1] : null;
 }
 
-function createFallbackMesh(node: FeatureNodeView, index: number): MeshPayload {
-  const template = mockMeshes[index % mockMeshes.length];
-  const offset = (index + 1) * 8;
-
-  return {
-    shapeId: node.shape_id ?? node.id,
-    name: node.name,
-    vertices: Array.from(template.vertices, (value, vertexIndex) => {
-      if (vertexIndex % 3 === 0) {
-        return value + offset;
-      }
-      if (vertexIndex % 3 === 1) {
-        return value + offset * FALLBACK_MESH_Y_OFFSET_SCALE;
-      }
-      return value;
-    }),
-    faces: Array.from(template.faces),
-    normals: template.normals ? Array.from(template.normals) : undefined,
-  };
-}
-
 export default function App(): JSX.Element {
+  const [showScene, setShowScene] = useState(false);
   const api = useMemo(() => new OpenCadApiClient(), []);
   const [tree, setTree] = useState<FeatureTreeView>(createEmptyTree);
+  const [meshErrors, setMeshErrors] = useState<Record<string, string>>({});
+  const [meshRetry, setMeshRetry] = useState(0);
   const [meshes, setMeshes] = useState<MeshPayload[]>([]);
   const [selectedNodeId, setSelectedNodeId] = useState<string>(tree.root_id);
 
@@ -94,7 +75,8 @@ export default function App(): JSX.Element {
         && !node.suppressed
         && Boolean(node.shape_id)
         && viewportShapeIds.has(node.shape_id as string)
-        && !loadedShapeIds.has(node.shape_id as string),
+        && !loadedShapeIds.has(node.shape_id as string)
+        && !meshErrors[node.shape_id as string],
     );
 
     if (missingShapeNodes.length === 0) {
@@ -104,11 +86,11 @@ export default function App(): JSX.Element {
     let cancelled = false;
 
     void Promise.all(
-      missingShapeNodes.map(async (node, index) => {
+      missingShapeNodes.map(async (node) => {
         try {
-          return await api.getMesh(node.shape_id as string);
+          return { mesh: await api.getMesh(node.shape_id as string), node };
         } catch {
-          return createFallbackMesh(node, index);
+          return { mesh: null, node };
         }
       }),
     ).then((loadedMeshes) => {
@@ -116,16 +98,44 @@ export default function App(): JSX.Element {
         return;
       }
 
+      setMeshErrors((current) => ({ ...current, ...Object.fromEntries(
+        loadedMeshes.filter(({ mesh }) => mesh === null).map(({ node }) => [
+          node.shape_id as string,
+          `Could not load geometry for ${node.name}. Retry, or regenerate the shape if the backend restarted.`,
+        ]),
+      ) }));
+      const successfulMeshes = loadedMeshes.flatMap(({ mesh }) => mesh ? [mesh] : []);
+      if (successfulMeshes.length === 0) return;
       setMeshes((current) => {
         const knownShapeIds = new Set(current.map((mesh) => mesh.shapeId));
-        return [...current, ...loadedMeshes.filter((mesh) => !knownShapeIds.has(mesh.shapeId))];
+        return [...current, ...successfulMeshes.filter((mesh) => !knownShapeIds.has(mesh.shapeId))];
       });
     });
 
     return () => {
       cancelled = true;
     };
-  }, [api, loadedShapeIds, tree, viewportShapeIds]);
+  }, [api, loadedShapeIds, tree, viewportShapeIds, meshErrors, meshRetry]);
+
+  if (showScene) {
+    return <main className="scene-demo">
+      <header>
+        <button type="button" className="scene-demo-toggle" onClick={() => setShowScene(false)}>Back to CAD</button>
+        <p>Independent scene roots: Robot arm · Box · Destination table</p>
+      </header>
+      <ScenePlayer document={robotPickPlaceExample.document} meshes={robotPickPlaceExample.meshes}
+        onSave={(document) => {
+          const url = URL.createObjectURL(new Blob([JSON.stringify(document, null, 2)], { type: "application/json" }));
+          const anchor = window.document.createElement("a");
+          anchor.href = url;
+          anchor.download = "robot-pick-place.scene.json";
+          window.document.body.appendChild(anchor);
+          anchor.click();
+          anchor.remove();
+          URL.revokeObjectURL(url);
+        }} />
+    </main>;
+  }
 
   return (
     <div className="app-shell">
@@ -136,6 +146,7 @@ export default function App(): JSX.Element {
       />
 
       <main className="workspace">
+        <button type="button" className="scene-demo-toggle" onClick={() => setShowScene(true)}>Robot pick-and-place demo</button>
         <CadFileToolbar
           canExport={Boolean(selectedShapeId)}
           onImport={async (file) => {
@@ -178,6 +189,16 @@ export default function App(): JSX.Element {
             URL.revokeObjectURL(downloadUrl);
           }}
         />
+        {Object.entries(meshErrors).filter(([id]) => viewportShapeIds.has(id)).length > 0 && (
+          <div role="alert">
+            {Object.entries(meshErrors).filter(([id]) => viewportShapeIds.has(id)).map(([id, message]) => (
+              <p key={id}>{message}</p>
+            ))}
+            <button type="button" onClick={() => { setMeshErrors({}); setMeshRetry((value) => value + 1); }}>
+              Retry loading geometry
+            </button>
+          </div>
+        )}
         <Viewport3D
           meshes={viewportMeshes}
           selectedShapeId={selectedShapeId}

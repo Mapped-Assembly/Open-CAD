@@ -245,12 +245,26 @@ class Part:
         if edge_spec in (None, "all"):
             return [edge.id for edge in topology.edges]
         if edge_spec == "top":
-            # Analytic topology does not carry directional tags on edges yet;
-            # returning a deterministic subset keeps API ergonomic.
-            return [edge.id for edge in topology.edges[:4]]
+            # The owning backend certifies whole-edge geometry. Consume its
+            # serialized tags so remote kernels behave exactly like local ones.
+            edge_ids = [edge.id for edge in topology.edges if "top" in edge.tags]
+            if not edge_ids:
+                raise ValueError(
+                    "No geometric top edges were reported for this shape. "
+                    "'top' requires non-degenerate edges lying wholly in its "
+                    "highest world-Z plane. Use an OCCT-backed context or "
+                    "explicit edge IDs instead."
+                )
+            return edge_ids
         raise ValueError(f"Unsupported edge selector '{edge_spec}'.")
 
     def fillet(self, *, edges: list[str] | str | None = None, radius: float, name: str = "Fillet") -> Self:
+        """Finish selected edges; ``top`` uses the native whole-edge world-Z tag.
+
+        ``None``/``all`` and explicit ID lists keep their existing behavior.
+        ``top`` raises ValueError when no geometric upper edge is reported,
+        including analytic-only contexts. See ``docs/EDGE_SELECTION.md``.
+        """
         feature_id, shape_id = self._require_shape()
         edge_ids = self._resolve_edge_ids(edges)
         return self._apply(
@@ -262,6 +276,12 @@ class Part:
         )
 
     def chamfer(self, *, edges: list[str] | str | None = None, distance: float, name: str = "Chamfer") -> Self:
+        """Finish selected edges; ``top`` uses the native whole-edge world-Z tag.
+
+        ``None``/``all`` and explicit ID lists keep their existing behavior.
+        ``top`` raises ValueError when no geometric upper edge is reported,
+        including analytic-only contexts. See ``docs/EDGE_SELECTION.md``.
+        """
         feature_id, shape_id = self._require_shape()
         edge_ids = self._resolve_edge_ids(edges)
         return self._apply(
@@ -288,8 +308,17 @@ class Part:
         face_ids: list[str],
         angle: float,
         pull_direction: tuple[float, float, float] = (0.0, 0.0, 1.0),
+        neutral_plane_origin: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        neutral_plane_normal: tuple[float, float, float] | None = None,
         name: str = "Draft",
     ) -> Self:
+        """Taper faces using signed degrees and a world-space neutral plane.
+
+        The default plane passes through the world origin, normal to
+        ``pull_direction``. Set its origin explicitly for translated parts.
+        For initially axis-parallel sides, positive angles taper inward on
+        the pull side and negative angles taper outward.
+        """
         feature_id, shape_id = self._require_shape()
         return self._apply(
             "draft",
@@ -298,6 +327,8 @@ class Part:
                 "face_ids": face_ids,
                 "angle": angle,
                 "pull_direction": pull_direction,
+                "neutral_plane_origin": neutral_plane_origin,
+                "neutral_plane_normal": neutral_plane_normal,
             },
             feature_name=name,
             depends_on=[feature_id],
@@ -306,6 +337,8 @@ class Part:
                 "face_ids": face_ids,
                 "angle": angle,
                 "pull_direction": pull_direction,
+                "neutral_plane_origin": neutral_plane_origin,
+                "neutral_plane_normal": neutral_plane_normal,
             },
         )
 
@@ -422,6 +455,7 @@ class Part:
         *,
         artifact_id: str | None = None,
         parameters: dict[str, Any] | None = None,
+        kinematic_joints: list[dict[str, Any]] | None = None,
         simulation_tags: list[dict[str, Any]] | None = None,
     ) -> Self:
         self._require_shape()
@@ -429,6 +463,7 @@ class Part:
             filepath,
             artifact_id=artifact_id or self._name,
             parameters=parameters,
+            kinematic_joints=kinematic_joints,
             simulation_tags=simulation_tags,
         )
         return self

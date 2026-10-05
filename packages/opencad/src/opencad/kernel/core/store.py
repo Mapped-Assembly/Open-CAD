@@ -4,7 +4,7 @@ from collections import defaultdict
 from typing import Literal
 from uuid import uuid4
 
-from .models import AssemblyMate, ShapeData
+from .models import AssemblyMate, KinematicJoint, ShapeData
 
 IdStrategy = Literal["uuid", "readable"]
 
@@ -17,6 +17,7 @@ class ShapeStore:
         # Set by OperationRegistry during replay so the next new_id() call
         # returns the stored identity instead of generating a fresh one.
         self._next_preset_id: str | None = None
+        self._reserved_ids: set[str] = set()
 
     def new_id(self, kind: str, *, preset_id: str | None = None) -> str:
         """Generate or accept a shape identifier.
@@ -33,8 +34,19 @@ class ShapeStore:
             return effective
         if self._id_strategy == "uuid":
             return str(uuid4())
-        self._counters[kind] += 1
-        return f"{kind}-{self._counters[kind]:04d}"
+        while True:
+            self._counters[kind] += 1
+            candidate = f"{kind}-{self._counters[kind]:04d}"
+            if candidate not in self._shapes and candidate not in self._reserved_ids:
+                return candidate
+
+    def reserve_ids(self, shape_ids: set[str]) -> None:
+        """Keep ordinary readable IDs out of a pending replay's namespace."""
+        self._reserved_ids.update(shape_ids)
+
+    def discard(self, shape_id: str) -> None:
+        """Remove orphaned metadata after its owning native shape is lost."""
+        self._shapes.pop(shape_id, None)
 
     def add(self, shape: ShapeData) -> ShapeData:
         self._shapes[shape.id] = shape
@@ -88,3 +100,48 @@ class MateStore:
 
     def all_ids(self) -> list[str]:
         return list(self._mates.keys())
+
+
+
+class JointStore:
+    """In-memory store for rigid kinematic joints."""
+
+    def __init__(self, id_strategy: IdStrategy = "uuid") -> None:
+        self._id_strategy = id_strategy
+        self._joints: dict[str, KinematicJoint] = {}
+        self._counter: int = 0
+
+    def new_id(self) -> str:
+        if self._id_strategy == "uuid":
+            return str(uuid4())
+        self._counter += 1
+        return f"joint-{self._counter:04d}"
+
+    def add(self, joint: KinematicJoint) -> KinematicJoint:
+        self._joints[joint.id] = joint
+        return joint
+
+    def get(self, joint_id: str) -> KinematicJoint | None:
+        return self._joints.get(joint_id)
+
+    def delete(self, joint_id: str) -> bool:
+        return self._joints.pop(joint_id, None) is not None
+
+    def by_child(self, shape_id: str) -> KinematicJoint | None:
+        return next(
+            (joint for joint in self._joints.values() if joint.child_shape_id == shape_id),
+            None,
+        )
+
+    def by_shape(self, shape_id: str) -> list[KinematicJoint]:
+        return [
+            joint
+            for joint in self._joints.values()
+            if joint.parent_shape_id == shape_id or joint.child_shape_id == shape_id
+        ]
+
+    def all(self) -> list[KinematicJoint]:
+        return list(self._joints.values())
+
+    def all_ids(self) -> list[str]:
+        return list(self._joints.keys())

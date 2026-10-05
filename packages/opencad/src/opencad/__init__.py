@@ -1,3 +1,12 @@
+from opencad.assembly import (
+    ASSEMBLY_SNAPSHOT_VERSION,
+    AssemblyComponent,
+    AssemblySnapshotV1,
+    AssemblyTree,
+    deserialize_assembly_tree,
+    import_assembly_tree,
+    serialize_assembly_tree,
+)
 from opencad.cli import main
 from opencad.design_artifact import (
     DesignArtifact,
@@ -11,8 +20,33 @@ from opencad.design_artifact import (
     validate_design_artifact_payload,
     validate_design_patch_payload,
 )
+from opencad.kinematics import (
+    clamp_progress,
+    compose_transforms,
+    evaluate_assembly_pose,
+    evaluate_joint_pose,
+    joint_value_at_progress,
+)
+from opencad.kernel.core.models import (
+    JointPose,
+    JointUnit,
+    KinematicJoint,
+    KinematicJointType,
+    RigidTransform,
+)
 from opencad.part import Part
-from opencad.runtime import RuntimeContext, get_default_context, reset_default_context, set_default_context
+from opencad.runtime import (
+    RuntimeContext,
+    get_default_context,
+    reset_default_context,
+    set_default_context,
+    use_default_context,
+)
+from opencad.scene import (
+    Attachment, Interaction, SceneDocument, SceneEntity, SceneInterface, SceneState,
+    SceneCollider, MotionCheck, validate_scene_motion,
+    deserialize_scene, evaluate_scene, scene_duration, serialize_scene,
+)
 from opencad.sketch import Sketch
 from opencad.turntable import (
     TurntableDependencyError,
@@ -23,12 +57,33 @@ from opencad.turntable import (
 from opencad.version import __version__
 
 __all__ = [
+    "ASSEMBLY_SNAPSHOT_VERSION",
+    "AssemblyComponent",
+    "AssemblySnapshotV1",
+    "AssemblyTree",
+    "deserialize_assembly_tree",
+    "import_assembly_tree",
+    "serialize_assembly_tree",
+    "SceneCollider",
+    "MotionCheck",
+    "validate_scene_motion",
+    "Attachment",
+    "Interaction",
+    "SceneDocument",
+    "SceneEntity",
+    "SceneInterface",
+    "SceneState",
+    "deserialize_scene",
+    "evaluate_scene",
+    "scene_duration",
+    "serialize_scene",
     "Part",
     "Sketch",
     "RuntimeContext",
     "get_default_context",
     "set_default_context",
     "reset_default_context",
+    "use_default_context",
     "main",
     "__version__",
     "DesignArtifact",
@@ -36,6 +91,16 @@ __all__ = [
     "DesignPatch",
     "ParameterPatch",
     "SimulationTag",
+    "KinematicJoint",
+    "KinematicJointType",
+    "JointUnit",
+    "JointPose",
+    "RigidTransform",
+    "clamp_progress",
+    "joint_value_at_progress",
+    "evaluate_joint_pose",
+    "evaluate_assembly_pose",
+    "compose_transforms",
     "apply_design_patch",
     "export_design_artifact",
     "load_design_artifact",

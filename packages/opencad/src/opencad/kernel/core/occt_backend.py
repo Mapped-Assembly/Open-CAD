@@ -52,6 +52,7 @@ BRepPrimAPI_MakeTorus = None
 
 # Geometry primitives
 gp_Pnt = None
+gp_Pln = None
 gp_Dir = None
 gp_Ax1 = None
 gp_Ax2 = None
@@ -121,6 +122,7 @@ if HAS_OCCT:  # pragma: no branch
 
     gp_mod = importlib.import_module("OCP.gp")
     gp_Pnt = gp_mod.gp_Pnt
+    gp_Pln = gp_mod.gp_Pln
     gp_Dir = gp_mod.gp_Dir
     gp_Ax1 = gp_mod.gp_Ax1
     gp_Ax2 = gp_mod.gp_Ax2
@@ -154,7 +156,12 @@ if HAS_OCCT:  # pragma: no branch
     TopTools_ListOfShape = toptools_mod.TopTools_ListOfShape
     TopTools_IndexedMapOfShape = toptools_mod.TopTools_IndexedMapOfShape
 
-from opencad.kernel.core.checks import check_bbox_overlap, check_manifold, check_nonzero_volume
+from opencad.kernel.core.checks import (
+    check_bbox_overlap,
+    check_bbox_separation,
+    check_manifold,
+    check_nonzero_volume,
+)
 from opencad.kernel.core.errors import ErrorCode, make_failure
 from opencad.kernel.core.models import (
     BoundingBox,
@@ -344,7 +351,9 @@ def _sketch_edge(
     if segment.type == "circle" and segment.center and segment.radius:
         cx, cy = segment.center
         if plane == "XZ":
-            axis = gp_Ax2(gp_Pnt(ox + cx, oy, oz + cy), gp_Dir(0, 1, 0))
+            # Local sketch X/Y map to world X/Z, whose oriented normal is -Y.
+            # Match line/arc winding so reversing an inner circle makes a hole.
+            axis = gp_Ax2(gp_Pnt(ox + cx, oy, oz + cy), gp_Dir(0, -1, 0))
         elif plane == "YZ":
             axis = gp_Ax2(gp_Pnt(ox, oy + cx, oz + cy), gp_Dir(1, 0, 0))
         else:
@@ -451,8 +460,18 @@ def _edge_length(edge: Any) -> float:
     return abs(props.Mass())
 
 
-def _build_topology_map(shape: Any, shape_id: str) -> TopologyMap:
-    """Build a full TopologyMap from a native OCCT shape."""
+def _build_topology_map(shape: Any, shape_id: str, *, tolerance: float = 1e-6) -> TopologyMap:
+    """Build native topology, including whole-edge world-Z ``top`` tags.
+
+    Use geometric bounds, not cached triangulations or edge enumeration. A
+    midpoint/centroid alone cannot prove that an entire curved edge is at the
+    top. AddOptimal without shape-tolerance inflation uses OCCT's geometric
+    confusion tolerance (1e-7), which is also the minimum comparison tolerance.
+    """
+    tolerance = max(tolerance, 1e-7)
+    bounds = Bnd_Box()
+    BRepBndLib.AddOptimal_s(shape, bounds, False, False)
+    top_z = None if bounds.IsVoid() else bounds.Get()[5]
     face_refs: list[SubshapeRef] = []
     explorer = TopExp_Explorer(shape, TopAbs_FACE)
     idx = 0
@@ -478,13 +497,29 @@ def _build_topology_map(shape: Any, shape_id: str) -> TopologyMap:
     for idx, edge in enumerate(_edges_from_shape(shape)):
         centroid = _edge_centroid(edge)
         length = _edge_length(edge)
+        tags: list[str] = []
+        # The centroid is only a cheap prefilter; the bounds check below is
+        # authoritative. Ignore zero-length pole edges and vertical seams.
+        if (
+            top_z is not None
+            and math.isfinite(top_z)
+            and length > tolerance
+            and not BRep_Tool.Degenerated_s(edge)
+            and abs(centroid[2] - top_z) <= tolerance
+        ):
+            edge_bounds = Bnd_Box()
+            BRepBndLib.AddOptimal_s(edge, edge_bounds, False, False)
+            if not edge_bounds.IsVoid():
+                _, _, zmin, _, _, zmax = edge_bounds.Get()
+                if abs(zmin - top_z) <= tolerance and abs(zmax - top_z) <= tolerance:
+                    tags.append("top")
         edge_refs.append(SubshapeRef(
             id=f"{shape_id}:edge:{idx}",
             kind=SubshapeKind.EDGE,
             index=idx,
             centroid=centroid,
             length=length,
-            tags=[],
+            tags=tags,
         ))
 
     return TopologyMap(shape_id=shape_id, faces=face_refs, edges=edge_refs)
@@ -866,7 +901,11 @@ class OcctBackend:
             m = check_manifold(shape)
             if m:
                 return m
-        if op in {"boolean_union", "boolean_intersection"}:
+        if op == "boolean_union":
+            # Face contact has zero overlap volume but can fuse into a solid.
+            # Keep the volume-overlap policy for intersection and analytic CAD.
+            return check_bbox_separation(a, b, self.tolerance)
+        if op == "boolean_intersection":
             overlap = check_bbox_overlap(a, b, self.tolerance)
             if overlap:
                 return overlap
@@ -894,7 +933,16 @@ class OcctBackend:
 
         try:
             if op == "boolean_union":
-                algo = BRepAlgoAPI_Fuse(native_a, native_b)
+                arguments, tool_shapes = TopTools_ListOfShape(), TopTools_ListOfShape()
+                arguments.Append(native_a)
+                tool_shapes.Append(native_b)
+                algo = BRepAlgoAPI_Fuse()
+                algo.SetArguments(arguments)
+                algo.SetTools(tool_shapes)
+                # Fusion may adjust tolerances near contact. Copy modified
+                # subshapes so the operands and their stored bounds stay valid.
+                algo.SetNonDestructive(True)
+                algo.Build()
             elif op == "boolean_cut":
                 algo = BRepAlgoAPI_Cut(native_a, native_b)
             else:
@@ -909,6 +957,34 @@ class OcctBackend:
                 )
 
             result_native = algo.Shape()
+            if op == "boolean_union":
+                if result_native.IsNull() or not _is_manifold(result_native):
+                    return make_failure(
+                        code=ErrorCode.NON_MANIFOLD,
+                        message="OCCT union produced invalid geometry.",
+                        suggestion="Check the contact for tangency or zero-thickness connections.",
+                        failed_check="boolean_result_validity",
+                    )
+                solids_a = cq.Shape.cast(native_a).Solids()
+                solids_b = cq.Shape.cast(native_b).Solids()
+                result_solids = cq.Shape.cast(result_native).Solids()
+                if not solids_a or not solids_b or not result_solids:
+                    return make_failure(
+                        code=ErrorCode.BOOLEAN_KERNEL_ERROR,
+                        message="Union requires solid operands and a solid result.",
+                        suggestion="Create closed solids before union.",
+                        failed_check="boolean_result_validity",
+                    )
+                # OCCT also reports success for a compound of disjoint solids.
+                # Two single bodies must actually join; existing multi-body
+                # pattern/compound operands may still have multi-body results.
+                if len(solids_a) == len(solids_b) == 1 and len(result_solids) != 1:
+                    return make_failure(
+                        code=ErrorCode.BOOLEAN_KERNEL_ERROR,
+                        message="OCCT union did not join the two solids into one solid.",
+                        suggestion="Move solids into face contact or overlap; edge or point contact is insufficient.",
+                        failed_check="boolean_result_connectivity",
+                    )
             result_volume = _volume_from_shape(result_native)
 
             if result_volume <= self.tolerance:
@@ -1338,49 +1414,98 @@ class OcctBackend:
         if not meta:
             return self._shape_not_found(payload.shape_id)
         if not payload.face_ids:
-            return self._invalid_input("At least one face_id required for draft.")
+            return self._invalid_input("At least one face_id is required for draft.")
         if abs(payload.angle) <= self.tolerance or abs(payload.angle) >= 90.0:
-            return self._invalid_input("Draft angle must be > 0 and < 90 degrees.")
+            return self._invalid_input("Draft angle magnitude must be > tolerance and < 90 degrees.")
+        if len(set(payload.face_ids)) != len(payload.face_ids):
+            return self._invalid_input("Draft face_ids must not contain duplicates.")
+        # A numeric suffix is not enough: foreign/stale face IDs must never
+        # select an unrelated face with the same index on the current shape.
+        for fid in payload.face_ids:
+            if fid not in meta.face_ids:
+                return self._invalid_input(f"Face '{fid}' does not belong to shape '{meta.id}'.")
 
         native = self._get_native(payload.shape_id)
         if native is None:
             return self._shape_not_found(payload.shape_id)
 
         try:
-            # Use CadQuery's shell-based draft approach for simplicity
-            # OCCT draft: BRepOffsetAPI_DraftAngle
+            solid_count = len(cq.Shape.cast(native).Solids())
+            if solid_count == 0 or not _is_manifold(native):
+                return self._invalid_input("Draft requires a valid solid or compound of solids.")
+
+            geom = importlib.import_module("OCP.GeomAbs")
+            faces = [_face_by_index(native, int(fid.rsplit(":", 1)[1])) for fid in payload.face_ids]
+            for fid, face in zip(payload.face_ids, faces):
+                if BRepAdaptor_Surface(face).GetType() not in (
+                    geom.GeomAbs_Plane, geom.GeomAbs_Cylinder, geom.GeomAbs_Cone,
+                ):
+                    return self._invalid_input(
+                        f"Face '{fid}' is not planar, cylindrical, or conical; draft is unsupported."
+                    )
+
+            # Scale finite, non-zero schema-validated vectors before OCCT
+            # normalization so very large/small direction magnitudes are safe.
+            def direction(values: tuple[float, float, float]) -> Any:
+                scale = max(abs(value) for value in values)
+                return gp_Dir(*(value / scale for value in values))
+
+            pull = direction(payload.pull_direction)
+            normal = direction(payload.neutral_plane_normal or payload.pull_direction)
+            neutral = gp_Pln(gp_Pnt(*payload.neutral_plane_origin), normal)
+            angle_rad = math.radians(payload.angle)
             DraftAngle = importlib.import_module("OCP.BRepOffsetAPI").BRepOffsetAPI_DraftAngle
             draft_op = DraftAngle(native)
-            pull = gp_Dir(*payload.pull_direction)
-            angle_rad = math.radians(payload.angle)
 
-            for fid in payload.face_ids:
-                parts = fid.split(":face:")
-                if len(parts) != 2 or not parts[1].isdigit():
-                    return self._invalid_input(f"Invalid face ID format: '{fid}'")
-                idx = int(parts[1])
-                face = _face_by_index(native, idx)
-                draft_op.Add(face, pull, angle_rad, gp_Pnt(0, 0, 0))
+            for fid, face in zip(payload.face_ids, faces):
+                draft_op.Add(face, pull, angle_rad, neutral)
+                # IsDone after Build alone does not establish that every
+                # requested face was accepted. Never publish a partial draft.
+                if not draft_op.AddDone():
+                    return make_failure(
+                        code=ErrorCode.DRAFT_FAILURE,
+                        message=f"Draft could not add face '{fid}' (status: {draft_op.Status()}).",
+                        suggestion="Check the face, pull direction, and neutral-plane intersection.",
+                        failed_check="draft_add",
+                    )
 
             draft_op.Build()
             if not draft_op.IsDone():
                 return make_failure(
                     code=ErrorCode.DRAFT_FAILURE,
-                    message="Draft did not converge.",
-                    suggestion="Reduce draft angle or choose different faces.",
+                    message=f"Draft did not converge (status: {draft_op.Status()}).",
+                    suggestion="Reduce draft angle or choose different faces/neutral plane.",
                     failed_check="draft_build",
                 )
 
             result_native = draft_op.Shape()
+            if result_native.IsNull() or not _is_manifold(result_native):
+                return make_failure(
+                    code=ErrorCode.DRAFT_FAILURE,
+                    message="Draft produced invalid native geometry.",
+                    suggestion="Reduce the angle or adjust the neutral plane.",
+                    failed_check="draft_validity",
+                )
+            result_volume = _volume_from_shape(result_native)
+            if (not math.isfinite(result_volume) or result_volume <= self.tolerance ** 3
+                    or len(cq.Shape.cast(result_native).Solids()) != solid_count):
+                return make_failure(
+                    code=ErrorCode.DRAFT_FAILURE,
+                    message="Draft did not preserve valid, non-zero-volume solid geometry.",
+                    suggestion="Reduce the angle to avoid collapsing a solid.",
+                    failed_check="draft_solid",
+                )
+
             shape = self._register_shape(
                 "draft", result_native, payload.model_dump(), source_ids=[meta.id],
             )
+            self._inherit_modified_face_owners(shape.id, [meta.id], draft_op)
             return self._success(shape, "draft")
         except Exception as exc:
             return make_failure(
                 code=ErrorCode.DRAFT_FAILURE,
                 message=f"Draft failed: {exc}",
-                suggestion="Reduce draft angle or adjust face selection.",
+                suggestion="Check the angle, face selection, pull direction, and neutral plane.",
                 failed_check="draft_build",
             )
 
@@ -1439,6 +1564,22 @@ class OcctBackend:
                         failed_check="profile_face_build",
                     )
                 native = face_builder.Face()
+                # IsDone only confirms that OCCT constructed a face. It can
+                # still contain crossing, tangent, or out-of-bounds hole wires.
+                if not _is_manifold(native):
+                    return make_failure(
+                        code=ErrorCode.SKETCH_ERROR,
+                        message=(
+                            "Invalid sketch profile: subtractive loops must lie strictly inside "
+                            "the outer profile and must not touch or intersect its boundary "
+                            "or each other. Check for tangency and self-intersection."
+                        ),
+                        suggestion=(
+                            "Move holes fully inside the profile with clearance. For an edge "
+                            "notch, extrude a separate cutting solid and use Part.cut()."
+                        ),
+                        failed_check="profile_validity",
+                    )
 
             # Store the profile as a wire, or as a face when it contains holes.
             shape_id = self._store.new_id("sketch")
@@ -1477,7 +1618,25 @@ class OcctBackend:
             if native.ShapeType() == TopAbs_FACE:
                 face = TopoDS.Face_s(native)
             else:
-                face = BRepBuilderAPI_MakeFace(native).Face()
+                face_builder = BRepBuilderAPI_MakeFace(native)
+                if not face_builder.IsDone():
+                    return make_failure(
+                        code=ErrorCode.EXTRUDE_FAILURE,
+                        message=f"Sketch '{meta.id}' cannot form a planar extrusion profile.",
+                        suggestion="Use a closed, planar profile without self-intersections.",
+                        failed_check="extrude_profile",
+                    )
+                face = face_builder.Face()
+            if not _is_manifold(face):
+                return make_failure(
+                    code=ErrorCode.EXTRUDE_FAILURE,
+                    message=f"Sketch '{meta.id}' has an invalid extrusion profile.",
+                    suggestion=(
+                        "Close the profile and remove self-intersections. Keep subtractive "
+                        "loops strictly inside the outer boundary without touching each other."
+                    ),
+                    failed_check="extrude_profile",
+                )
             # Raise along the sketch plane's normal. Extruding a non-XY sketch
             # along Z would sweep the profile within its own plane and produce a
             # zero-volume shape that still looks like a success.
@@ -1495,6 +1654,21 @@ class OcctBackend:
             else:
                 prism_mod = importlib.import_module("OCP.BRepPrimAPI")
                 result_native = prism_mod.BRepPrimAPI_MakePrism(face, vec).Shape()
+
+            # Do not register an invalid or zero-volume body as a successful
+            # feature and leave a later boolean to report a misleading error.
+            if (
+                result_native.IsNull()
+                or not _is_manifold(result_native)
+                or not cq.Shape.cast(result_native).Solids()
+                or _volume_from_shape(result_native) <= self.tolerance
+            ):
+                return make_failure(
+                    code=ErrorCode.EXTRUDE_FAILURE,
+                    message=f"Extruding sketch '{meta.id}' did not produce a valid solid.",
+                    suggestion="Check the profile for tangency or self-intersection and use a non-zero depth.",
+                    failed_check="extrude_result",
+                )
 
             shape = self._register_shape(
                 "extrude", result_native, payload.model_dump(), source_ids=[meta.id],
@@ -1762,4 +1936,4 @@ class OcctBackend:
         native = self._get_native(shape_id)
         if native is None:
             raise ValueError(f"Shape '{shape_id}' not found.")
-        return _build_topology_map(native, shape_id)
+        return _build_topology_map(native, shape_id, tolerance=self.tolerance)

@@ -11,6 +11,7 @@
 
 export { CadFileToolbar } from "./components/CadFileToolbar";
 export { ChatPanel } from "./components/ChatPanel";
+export { ComponentTreePanel } from "./components/ComponentTreePanel";
 export { FeatureTreePanel } from "./components/FeatureTreePanel";
 export { SketchEditor } from "./components/SketchEditor";
 export { Viewport3D } from "./components/Viewport3D";
@@ -22,10 +23,12 @@ export type { MeshStreamChunk } from "./api/client";
 
 // ── Feature-tree helpers ────────────────────────────────────────────
 
+export { getAssemblyComponentIds, getAssemblyGeometryRefs, getAssemblyParents } from "./assemblyTree";
 export { projectFeatureTree } from "./featureTreeProjection";
 export type { FeatureTreeProjection, ToolBranchReference } from "./featureTreeProjection";
 export { getHighlightedViewportShapeIds, getViewportShapeIds } from "./featureVisibility";
 export { getMeshMaterialGroups } from "./meshHighlight";
+export { IDENTITY_RIGID_TRANSFORM, normalizeRigidTransform, transformsFromJointPoses } from "./shapeTransforms";
 export type { MeshMaterialGroup } from "./meshHighlight";
 export { sketchFromNode } from "./sketchData";
 
@@ -35,8 +38,10 @@ export { mockChat, mockFeatureTree, mockMeshes, mockSketch, mockSolveSketch } fr
 
 // ── Types ───────────────────────────────────────────────────────────
 
-export { createEmptySketch, createEmptyTree } from "./types";
+export { createEmptyAssemblyTree, createEmptySketch, createEmptyTree } from "./types";
 export type {
+  AssemblyComponentView,
+  AssemblyTreeView,
   CadFileFormat,
   CadImportResult,
   ChatHistoryItem,
@@ -47,6 +52,11 @@ export type {
   FeatureNodeStatus,
   FeatureNodeView,
   FeatureTreeView,
+  CreateKinematicJointInput,
+  JointPose,
+  JointUnit,
+  KinematicJoint,
+  KinematicJointType,
   MeshFaceGroup,
   MeshPayload,
   ParameterBinding,
@@ -59,7 +69,19 @@ export type {
   SketchPayload,
   SketchPoint,
   SketchRectangle,
+  RigidTransform,
   SolverResult,
   TreeSnapshotPayload,
   TypedParameter,
 } from "./types";
+
+// Independent scenes and temporary interaction relationships.
+export { ScenePlayer } from "./components/ScenePlayer";
+export type { ScenePlayerProps } from "./components/ScenePlayer";
+export { createScenePlayer, evaluateScene, sceneDuration, validateScene } from "./scene";
+export type { Attachment, Interaction, SceneDocument, SceneEntity, SceneInterface, SceneState } from "./scene";
+export { robotPickPlaceExample } from "./examples/robotPickPlace";
+
+export { validateSceneMotion, clampSceneTime } from "./sceneCollision";
+export type { MotionCheck, CollisionOptions } from "./sceneCollision";
+export type { SceneCollider } from "./scene";

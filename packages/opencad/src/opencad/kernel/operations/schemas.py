@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from opencad.kernel.core.models import KinematicJointType
+from pydantic import BaseModel, Field, FiniteFloat, field_validator, model_validator
 
 
 # ── Primitives ──────────────────────────────────────────────────────
@@ -74,12 +75,33 @@ class ShellInput(BaseModel):
 
 
 class DraftInput(BaseModel):
-    """Add a taper/draft angle to selected faces."""
+    """Taper selected faces about a world-space neutral plane.
+
+    Angles are signed degrees. By default the plane passes through the world
+    origin and is perpendicular to the pull direction. Its intersection with
+    each selected face remains fixed. For sides initially parallel to the pull
+    axis, positive angles taper inward on the pull side and negative outward.
+    """
 
     shape_id: str = Field(min_length=1)
     face_ids: list[str]
-    angle: float  # degrees
-    pull_direction: tuple[float, float, float] = (0.0, 0.0, 1.0)
+    angle: FiniteFloat  # signed degrees; backend validates the supported range
+    pull_direction: tuple[FiniteFloat, FiniteFloat, FiniteFloat] = (0.0, 0.0, 1.0)
+    neutral_plane_origin: tuple[FiniteFloat, FiniteFloat, FiniteFloat] = Field(
+        default=(0.0, 0.0, 0.0), description="Point on the neutral plane in world coordinates.",
+    )
+    neutral_plane_normal: tuple[FiniteFloat, FiniteFloat, FiniteFloat] | None = Field(
+        default=None, description="World-space plane normal; omitted/null uses pull_direction.",
+    )
+
+    @field_validator("pull_direction", "neutral_plane_normal")
+    @classmethod
+    def nonzero_direction(
+        cls, value: tuple[float, float, float] | None,
+    ) -> tuple[float, float, float] | None:
+        if value is not None and not any(value):
+            raise ValueError("Draft directions must be non-zero.")
+        return value
 
 
 class OffsetShapeInput(BaseModel):
@@ -226,6 +248,68 @@ class ListAssemblyMatesInput(BaseModel):
     """Optionally filter by entity involvement."""
 
     entity_ref: str | None = None
+
+
+# ── Rigid kinematic joints ─────────────────────────────────────────
+
+
+class CreateKinematicJointInput(BaseModel):
+    """Create one rigid DOF relationship between two shape occurrences.
+
+    Revolute limits are radians; prismatic limits are millimeters.
+    """
+
+    type: KinematicJointType
+    joint_id: str | None = Field(default=None, min_length=1)
+    parent_shape_id: str = Field(min_length=1)
+    child_shape_id: str = Field(min_length=1)
+    axis: tuple[FiniteFloat, FiniteFloat, FiniteFloat] = (0.0, 0.0, 1.0)
+    origin_mm: tuple[FiniteFloat, FiniteFloat, FiniteFloat] = (0.0, 0.0, 0.0)
+    lower_limit: FiniteFloat = 0.0
+    upper_limit: FiniteFloat = 0.0
+    label: str | None = None
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def valid_joint(self) -> "CreateKinematicJointInput":
+        if self.parent_shape_id == self.child_shape_id:
+            raise ValueError("Kinematic joint parent and child must be different shapes.")
+        if self.lower_limit > self.upper_limit:
+            raise ValueError("lower_limit must be <= upper_limit.")
+        if self.type != KinematicJointType.FIXED and not any(self.axis):
+            raise ValueError("Movable kinematic joints require a non-zero axis.")
+        if self.type == KinematicJointType.FIXED and (
+            self.lower_limit != 0.0 or self.upper_limit != 0.0
+        ):
+            raise ValueError("Fixed joints must use zero limits.")
+        return self
+
+
+class DeleteKinematicJointInput(BaseModel):
+    joint_id: str = Field(min_length=1)
+
+
+class ListKinematicJointsInput(BaseModel):
+    shape_id: str | None = None
+
+
+class EvaluateKinematicJointInput(BaseModel):
+    joint_id: str = Field(min_length=1)
+    progress: FiniteFloat = Field(default=0.0, ge=0.0, le=1.0)
+
+
+class EvaluateKinematicAssemblyInput(BaseModel):
+    progress_by_joint: dict[str, FiniteFloat] = Field(default_factory=dict)
+
+    @field_validator("progress_by_joint")
+    @classmethod
+    def normalized_progress(cls, value: dict[str, float]) -> dict[str, float]:
+        for joint_id, progress in value.items():
+            if progress < 0.0 or progress > 1.0:
+                raise ValueError(
+                    f"Joint progress for '{joint_id}' must be between 0 and 1."
+                )
+        return value
 
 
 # ── Topology selectors ─────────────────────────────────────────────
