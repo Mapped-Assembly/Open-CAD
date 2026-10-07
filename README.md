@@ -397,3 +397,17 @@ exports and validates STEP, STP, or STL.
 - [ARCHITECTURE.md](ARCHITECTURE.md) — component design and API contracts
 - [TOPOLOGY.md](TOPOLOGY.md) — topology reference stability (open research question)
 - [SECURITY.md](SECURITY.md) — vulnerability reporting and hardening baseline
+
+## Citation
+
+If you use OpenCAD in research, publications, or other academic work, please cite the project:
+
+```bibtex
+@software{mapped_assembly_opencad_2026,
+  author = {{Mapped Assembly}},
+  title = {OpenCAD: Modular CAD for parametric, programmable, and AI-assisted design},
+  year = {2026},
+  url = {https://github.com/Mapped-Assembly/Open-CAD},
+  note = {Open-source software}
+}
+```
